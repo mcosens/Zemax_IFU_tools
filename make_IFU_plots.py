@@ -12,6 +12,8 @@ Description: uses ZOS-API to perform ray tracing on specified slices, wavelength
 -footprint plots for all bands (very slow to make in zemax with this many configurations)
 '''
 ##import packages
+import os
+import pandas as pd
 import zos_pyclass
 import matplotlib as mpl
 import matplotlib.pyplot as plt
@@ -182,11 +184,9 @@ def get_spot_sizes(system, configs, fields, waves, nrays):
     spot_setting.Patterns = ZOSAPI.Analysis.Settings.Spot.Patterns.Dithered 
     spot_setting.RayDensity = nrays
     results = np.full((len(configs), len(fields), len(waves), 2), fill_value=np.nan) #empty array for RMS and Geo radius for each field/wavelength
-    slice_center = np.full(len(configs), fill_value=np.nan)
     for k in range(len(configs)):
         c=configs[k]
         system.MCE.SetCurrentConfiguration(c)
-        slice_center[k] = system.SystemData.Fields.GetField(1).Y
         for i in range(len(fields)):
             for j in range(len(waves)):
                 f, w = fields[i], waves[j]
@@ -195,7 +195,47 @@ def get_spot_sizes(system, configs, fields, waves, nrays):
                 spot.ApplyAndWaitForCompletion()
                 spot_results = spot.GetResults()
                 results[k, i, j, :] = spot_results.SpotData.GetRMSSpotSizeFor(f, w), spot_results.SpotData.GetGeoSpotSizeFor(f, w)
-    return results, slice_center
+    spot.Close() #close analysis to avoid errors with limits on total number of analyses
+    return results
+
+def get_footprint(system, config=1, field=0, wave=0, nrays=10, delete_vignetted=True, outpath=".\\", outfile="footprint_res.txt"):
+    """
+    Computes footprint diagram data for given configuration, field #, and wavelength # using ZOS-API analysis.
+
+    Parameters:
+    - system: The ZOS system object
+    - config (default=1): Configuration number
+    - field (default=0): Field number (0=all fields)
+    - wave (default=0): Wavelength number (0=all wavelengths)
+    - nrays (default=10): Number of rays for the analysis
+    - delete_vignetted (default=True): Whether to delete vignetted rays
+    - outpath (default=".\\"): filepath to save intermediate and final files
+    - outfile (default="footprint_res.txt"): filename to save footprint data (e.g. 'footprint_res.txt')
+
+    Returns:
+    - saves footprint diagram data to text file at outfile
+    """
+    system.MCE.SetCurrentConfiguration(config) #set to first config of K band
+    footprint = system.Analyses.New_Analysis(ZOSAPI.Analysis.AnalysisIDM.FootprintSettings) #Footprint Diagram not yet built in
+    #modify settings
+    foot_settings = footprint.GetSettings()
+    foot_cfgFile = f"{outpath}footprint_settings.cfg"
+    foot_settings.SaveTo(foot_cfgFile)
+    foot_settings.ModifySettings(foot_cfgFile, "FOO_RAYDENSITY", "10")
+    foot_settings.ModifySettings(foot_cfgFile, "FOO_SURFACE", str(system.LDE.NumberOfSurfaces))
+    foot_settings.ModifySettings(foot_cfgFile, "FOO_FIELD", str(field))
+    foot_settings.ModifySettings(foot_cfgFile, "FOO_WAVELENGTH", str(wave))
+    if delete_vignetted:
+        foot_settings.ModifySettings(foot_cfgFile, "FOO_DELETEVIGNETTED", "1") #1=yes, 0=no
+    else:
+        foot_settings.ModifySettings(foot_cfgFile, "FOO_DELETEVIGNETTED", "0") #1=yes, 0=no
+    foot_settings.LoadFrom(foot_cfgFile)
+    footprint.ApplyAndWaitForCompletion()
+    #read results and save to text file (later can read in and make plots)
+    foot_results = footprint.GetResults()
+    foot_results.GetTextFile(f"{outpath}\\{outfile}")
+    os.remove(foot_cfgFile) #clean up intermediate file
+    footprint.Close() #close analysis to avoid errors with limits on total number of analyses
 
 ##run functions of interest
 if __name__ == '__main__':
@@ -226,6 +266,13 @@ if __name__ == '__main__':
     N = len(bands)*nwaves
     plt.rcParams["axes.prop_cycle"] = plt.cycler("color", plt.cm.YlOrRd(np.linspace(0.1,1,N)))
 
+    #get center field position for each slice (should be the same for all configs in a band since only slice position is changing)
+    slice_cen = np.full(int(nconfigs/len(bands)), fill_value=np.nan)
+    for c in range(int(nconfigs/len(bands))):
+        IFU_MCE.SetCurrentConfiguration(c+1)
+        slice_cen[c] = IFU_System.SystemData.Fields.GetField(1).Y
+    slice_cen*=3600 #convert to arcseconds for plotting
+
     ##spot diagrams (field positions match layout on slice but spacing is not representative)
     '''
     #done already, don't need to repeat
@@ -237,7 +284,7 @@ if __name__ == '__main__':
             make_spot_diagram(IFU_System, c+1, range(1,nfields+1), range(1,nwaves+1), 30, bands[band_n], band_n, res_dir+'\\spot_diagrams\\', norm_waves=True)
     
     ##get spot sizes for all fields and wavelengths
-    spot_radii, slice_cen = get_spot_sizes(IFU_System, range(1, nconfigs+1), range(1,nfields+1), range(1,nwaves+1), 15)
+    spot_radii = get_spot_sizes(IFU_System, range(1, nconfigs+1), range(1,nfields+1), range(1,nwaves+1), 15)[0]
     rms_radii, geo_radii = spot_radii[:,:,:,0], spot_radii[:,:,:,1]
 
     ##generate plot of spot radii as a function of slice position for each wavelength
@@ -245,11 +292,11 @@ if __name__ == '__main__':
     
     ##may want to seperate retrieving results and plotting (could save results to fits files in order to close zos application before messing with plots)
     plt.figure(figsize=(7,5))
-    for i in range(5): #loop through each MIRMOS spectral band
+    for i in range(len(bands)): #loop through each MIRMOS spectral band
         IFU_MCE.SetCurrentConfiguration(1+i*21)
         plt.plot(0,15, 'o', c='none', label=bands[i]+' band') #invisible point to get label in legend
         for j in range(nwaves):
-            plt.plot(slice_cen[:21]*3600, np.nanmean(rms_radii[i*21:21+i*21,:,j], axis=1), band_shapes[i], label=f"$\\rm{IFU_System.SystemData.Wavelengths.GetWavelength(j+1).Wavelength:.3f} \mu m$") #round wavelength to 3 decimal places
+            plt.plot(slice_cen, np.nanmean(rms_radii[i*21:21+i*21,:,j], axis=1), band_shapes[i], label=f"$\\rm{IFU_System.SystemData.Wavelengths.GetWavelength(j+1).Wavelength:.3f} \mu m$") #round wavelength to 3 decimal places
     xlims, ylims = plt.xlim(), plt.ylim() #limits based on results
     plt.hlines(y=16.9, xmin=xlims[0], xmax=xlims[1], color='r')#, label='Requirement') 
     plt.vlines(x=0, ymin=ylims[0], ymax=ylims[1], lw=1, color='k', alpha=0.2, zorder=0)
@@ -262,13 +309,138 @@ if __name__ == '__main__':
     plt.savefig(f"{res_dir}RMS_spot_means.png", bbox_inches='tight')
     plt.close()
     '''
-    ##detector footprint diagrams for each band
-    #start with matching Zemax to verify, then make spectra continuous in wavelength
-    #use to evaluate fraction of wavelength range truncated for each slice
-    IFU_System.Analyses.New_Analysis(ZOSAPI.Analysis.AnalysisIDM.FootprintSettings) #Footprint Diagram not yet built in
+    ##detector footprint stats for each band
     #calculate spatial extent on detector for each slice/band
-    #space between slices for each band
+    #use without vignetting to evaluate fraction of wavelength range truncated for each slice
+    spec_ycen, spec_xcen = np.full((nconfigs, nfields, nwaves), fill_value=np.nan), np.full((nconfigs, nfields, nwaves), fill_value=np.nan)
+    for c in range(nconfigs):
+        for f in range(nfields):
+            for w in range(nwaves):
+                get_footprint(IFU_System, config=c+1, field=f+1, wave=w+1, nrays=10, delete_vignetted=False, outpath=res_dir+'footprints\\', outfile=f'footprint_config{c+1}_field{f+1}_wave{w+1}.txt')
+    #read in text file and get positions and extent, save to arrays
+    for c in range(nconfigs):
+        for fd in range(nfields):
+            for w in range(nwaves):
+                with open(f"{res_dir}\\footprints\\footprint_config{c+1}_field{fd+1}_wave{w+1}.txt", 'r', encoding='utf-16') as f:
+                    lines = f.readlines()
+                    for line in lines:
+                        #get lines with '=' and split on that
+                        if '=' in(line):
+                            param, value = line.split('=')
+                            if param.strip()=='Ray X Center':
+                                spec_xcen[c,fd,w] = float(value.strip())
+                            elif param.strip()=='Ray Y Center':
+                                spec_ycen[c,fd,w] = float(value.strip())
+    #use positions to plot footprint diagrams for each band, color by slice (fill is approximate)
+    plt.rcParams["axes.prop_cycle"] = plt.cycler("color", plt.cm.tab20b(np.concatenate([np.linspace(0.5,1,11), np.linspace(0.5,0,11)])))
+    plt.rcParams["axes.prop_cycle"] = plt.cycler("color", plt.cm.nipy_spectral(np.concatenate([np.linspace(0.5,1,11), np.linspace(0.5,0,11)])))
+    fig, ax = plt.subplots(nrows=2, ncols=2, figsize=(10,10), layout='tight')
+    col_num=np.linspace(0.1,1,21)
+    for i in range(len(bands)-1):
+        row = i%2
+        col = int(i/2)
+        ax[row, col].set_title(f"{bands[i+1]} band")
+        for k in range((i+1)*21,(i+1)*21+21):
+            ax[row, col].fill_between(x=[np.nanmin(spec_xcen[k,:,:]), np.nanmax(spec_xcen[k,:,:])], y1=np.nanmin(spec_ycen[k,:,:]), y2=np.nanmax(spec_ycen[k,:,:]))
+        ax[row, col].set_xlim(-18.4, 18.4)
+        ax[row, col].set_ylim(-18.4, 18.4)
+    plt.tight_layout()
+    plt.savefig(f"{res_dir}footprint_diagrams.png", bbox_inches='tight')
+    plt.close()
 
+    #get spatial and spectral extent from arrays and make plot of values by band (later can make 2D plot of spatial vs spectral extent for each slice)
+    spec_extent = np.sqrt((spec_ycen[:,1,2]-spec_ycen[:,1,0])**2 + (spec_xcen[:,1,2]-spec_xcen[:,1,0])**2) #use central field
+    spatial_extent = np.sqrt((spec_ycen[:,-1,2]-spec_ycen[:,-2,2])**2 + (spec_xcen[:,-1,2]-spec_xcen[:,-2,2])**2) #use central wavelength
+    #later add plot of space between slices by band
+    plt.rcParams["axes.prop_cycle"] = plt.cycler("color", plt.cm.YlOrRd(np.linspace(0.1,1,len(bands))))
+    fig, ax = plt.subplots(nrows=2, ncols=1, figsize=(7,10), layout='tight', sharex=True)
+    for i in range(len(bands)): #loop through each MIRMOS spectral band
+        ax[0].plot(slice_cen, spatial_extent[i*21:21+i*21], band_shapes[i], label=bands[i]+' band')
+        ax[1].plot(slice_cen, spec_extent[i*21:21+i*21], band_shapes[i], label=bands[i]+' band')
+    ax[1].set_ylim(26,30) #leave off i-band since spectral extent is not meaningful
+    ax[0].set_ylabel("Spatial Extent on Detector [mm]")
+    secax = ax[0].secondary_yaxis('right', functions=(lambda x: (x - 1.222) / 1.222 * 100,
+                                                      lambda y: y / 100 * 1.222 + 1.222))
+    xlims = ax[0].get_xlim() #limits based on results
+    ax[0].hlines(y=1.222, xmin=xlims[0], xmax=xlims[1], color='gray', alpha=0.7, ls='--', zorder=0)
+    ax[0].set_xlim(xlims)
+    secax.set_ylabel("Spatial Extent Deviation from Nominal [%]")
+    ax[1].set_ylabel("Spectral Extent on Detector [mm]")
+    ax[1].set_xlabel("Slice Position From Center [arcseconds]")
+    ax[1].set_ylabel("Spectral Extent on Detector [mm]")
+    ax[0].legend(ncols=5, loc='upper center')
+    plt.tight_layout()
+    plt.savefig(f"{res_dir}detector_extent.png", bbox_inches='tight')
+    plt.close()
+
+    #space between slices for each band
+    #start with plotting central wavelength, then check it's the same at edge wavelengths
+    spec_gap = np.full((nconfigs, nwaves), fill_value=np.nan) #need one less config since this is difference between adjacent slices
+    for b in range(len(bands)):
+        for i in range(1,len(slice_cen)):
+            if slice_cen[i]>0: 
+                #previous slice field6[5] - current slice field7[6]
+                spec_gap[(i-1)+b*21,:] = spec_xcen[i-1+b*21,5,:]-spec_xcen[i+b*21,6,:] - (rms_radii[i-1+b*21,5,:]+rms_radii[i+b*21,6,:])/1000 #subtract spot radius to get gap between slices rather than centroids
+            elif i==11:
+                spec_gap [(i-1)+b*21,:] = spec_xcen[i+b*21,5,:]-spec_xcen[b*21,6,:] - (rms_radii[i+b*21,5,:]+rms_radii[b*21,6,:])/1000#first negative slice needs to be compared to center slice
+            else:
+                #current slice field6[5] - previous slice field7[6]
+                spec_gap[(i-1)+b*21,:] = spec_xcen[i+b*21,5,:]-spec_xcen[i-1+b*21,6,:] - (rms_radii[i+b*21,5,:]+rms_radii[i-1+b*21,6,:])/1000 #subtract spot radius to get gap between slices rather than centroids
+    spec_gap = spec_gap[~np.isnan(spec_gap).any(axis=1)] #drop nan values from spec_gap (no gap for center slice)
+
+    #plot results
+    plt.rcParams["axes.prop_cycle"] = plt.cycler("color", plt.cm.YlOrRd(np.linspace(0.1,1,N)))
+    avg_cen = np.concatenate([np.linspace(0.5*.84,9.5*.84, int((len(slice_cen)-1)/2)), np.linspace(-0.5*.84,-9.5*.84, int((len(slice_cen)-1)/2))])
+    plt.figure(figsize=(7,5))
+    for i in range(len(bands)): #loop through each MIRMOS spectral band
+        IFU_MCE.SetCurrentConfiguration(1+i*21)
+        plt.plot(0,15, 'o', c='none', label=bands[i]+' band') #invisible point to get label in legend
+        for j in range(nwaves):
+            if i==0: #imaging chanel has different pixle scale
+                plt.plot(avg_cen, spec_gap[i*20:20+i*20,j]/0.015, band_shapes[i], label=f"$\\rm{IFU_System.SystemData.Wavelengths.GetWavelength(j+1).Wavelength:.3f} \mu m$") #round wavelength to 3 decimal places
+            else:
+                plt.plot(avg_cen, spec_gap[i*20:20+i*20,j]/0.018, band_shapes[i], label=f"$\\rm{IFU_System.SystemData.Wavelengths.GetWavelength(j+1).Wavelength:.3f} \mu m$") #round wavelength to 3 decimal places
+    plt.xlabel("Slice Position From Center [arcseconds]")
+    plt.ylabel("Gap Between Slices [pixels]")
+    plt.legend(ncols=5, loc='upper center')
+    plt.tight_layout()
+    plt.savefig(f"{res_dir}detector_spacing.png", bbox_inches='tight')
+    plt.close()
+
+    ##wavelength truncation by band/slice
+    #get distance above or below edge of detector and compare to spectral extent of that slice to get fraction truncated and what wavelengths are covered
+    spectral_coverage = np.zeros(nconfigs) #negative=red end truncated, positive=blue end truncated, 0=no truncation, abs value is fraction of wavelengths truncated based on distance from edge of detector and spectral extent of slice
+    for i in range(nconfigs):
+        if spec_ycen[i,1,0]>18.4: #blue end truncated
+            spectral_coverage[i] = (spec_ycen[i,1,0]-18.4)/spec_extent[i] #fraction of wavelengths truncated based on distance from edge of detector and spectral extent of slice
+        elif spec_ycen[i,1,2]<-18.4: #red end truncated
+            spectral_coverage[i] = (18.4+spec_ycen[i,1,2])/spec_extent[i] #fraction of wavelengths truncated based on distance from edge of detector and spectral extent of slice
+    #plot results
+    plt.rcParams["axes.prop_cycle"] = plt.cycler("color", plt.cm.YlOrRd(np.linspace(0.325,1,len(bands)-1)))
+    plt.figure(figsize=(7,5)) 
+    for i in range(1,len(bands)): #loop through each MIRMOS spectral bands
+        plt.plot(slice_cen, spectral_coverage[i*21:21+i*21]*100, band_shapes[i], label=bands[i]+' band')
+    plt.xlabel("Slice Position From Center [arcseconds]")
+    plt.ylabel("% of Wavelength Range Truncated")
+    plt.legend(ncols=5, loc='upper center')
+    plt.tight_layout()
+    plt.savefig(f"{res_dir}spectral_truncation.png", bbox_inches='tight')
+    plt.close()
+
+    #generate table of spectral coverage by slice and band from spectral_coverge array
+    spectral_table = pd.DataFrame(spectral_coverage.reshape(21, 5, order='F'), columns=[f"{bands[i]}_trunc_frac" for i in range(len(bands))])
+    for i in range(1,len(bands)):
+        IFU_MCE.SetCurrentConfiguration(1+i*21)
+        band_start = IFU_System.SystemData.Wavelengths.GetWavelength(1).Wavelength
+        band_end = IFU_System.SystemData.Wavelengths.GetWavelength(nwaves).Wavelength
+        spectral_table[f"{bands[i]}_start"] = band_start
+        spectral_table[f"{bands[i]}_end"] = band_end
+        for j in range(len(spectral_table)):
+            if spectral_table[f"{bands[i]}_trunc_frac"][j]<0: #red end truncated
+                spectral_table.loc[j, f"{bands[i]}_end"] = band_end + spectral_table[f"{bands[i]}_trunc_frac"][j]*(band_end - band_start)
+            elif spectral_table[f"{bands[i]}_trunc_frac"][j]>0: #blue end truncated
+                spectral_table.loc[j, f"{bands[i]}_start"] = band_start + spectral_table[f"{bands[i]}_trunc_frac"][j]*(band_end - band_start)
+    spectral_table.to_csv(f"{res_dir}spectral_coverage_table.csv")
 
     ##footprint diagrams at pupil for each band
     #use to calculate vignetting as function of field position
