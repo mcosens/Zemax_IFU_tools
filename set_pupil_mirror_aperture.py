@@ -13,7 +13,7 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
 from System import Enum, Int32, Double
-#from make_IFU_plots import get_footprint #would need to make more general and pass api instance to make this work - Todo later
+from zemax_functions import get_footprint, local_to_global_coords #would need to make more general and pass api instance to make this work - Todo later
 
 ##set-up rcparams to control plot style (later move to a custom file that is read in)
 #legend
@@ -25,68 +25,6 @@ mpl.rcParams['legend.borderaxespad'] = 0.1
 #fontsizes
 mpl.rcParams['axes.titlesize'] = 14
 mpl.rcParams['axes.labelsize'] = 12
-
-    
-##functions to be used
-def get_footprint(system, config=1, field=0, wave=0, nrays=10, surface=0, delete_vignetted=True, outpath=".\\", outfile="footprint_res.txt"):
-    """
-    Computes footprint diagram data for given configuration, field #, and wavelength # using ZOS-API analysis.
-
-    Parameters:
-    - system: The ZOS system object
-    - config (default=1): Configuration number
-    - field (default=0): Field number (0=all fields)
-    - wave (default=0): Wavelength number (0=all wavelengths)
-    - nrays (default=10): Number of rays for the analysis
-    - surface (default=0): Surface number to evaluate footprint at (0=image surface)
-    - delete_vignetted (default=True): Whether to delete vignetted rays
-    - outpath (default=".\\"): filepath to save intermediate and final files
-    - outfile (default="footprint_res.txt"): filename to save footprint data (e.g. 'footprint_res.txt')
-
-    Returns:
-    - saves footprint diagram data to text file at outfile
-    """
-    system.MCE.SetCurrentConfiguration(config) #set to first config of K band
-    footprint = system.Analyses.New_Analysis(ZOSAPI.Analysis.AnalysisIDM.FootprintSettings) #Footprint Diagram not yet built in
-    #modify settings
-    foot_settings = footprint.GetSettings()
-    foot_cfgFile = f"{outpath}footprint_settings.cfg"
-    foot_settings.SaveTo(foot_cfgFile)
-    foot_settings.ModifySettings(foot_cfgFile, "FOO_RAYDENSITY", "10")
-    if surface==0:
-        foot_settings.ModifySettings(foot_cfgFile, "FOO_SURFACE", str(system.LDE.NumberOfSurfaces))
-    else:
-        foot_settings.ModifySettings(foot_cfgFile, "FOO_SURFACE", str(surface))
-    foot_settings.ModifySettings(foot_cfgFile, "FOO_FIELD", str(field))
-    foot_settings.ModifySettings(foot_cfgFile, "FOO_WAVELENGTH", str(wave))
-    if delete_vignetted:
-        foot_settings.ModifySettings(foot_cfgFile, "FOO_DELETEVIGNETTED", "1") #1=yes, 0=no
-    else:
-        foot_settings.ModifySettings(foot_cfgFile, "FOO_DELETEVIGNETTED", "0") #1=yes, 0=no
-    foot_settings.LoadFrom(foot_cfgFile)
-    footprint.ApplyAndWaitForCompletion()
-    #read results and save to text file (later can read in and make plots)
-    foot_results = footprint.GetResults()
-    foot_results.GetTextFile(f"{outpath}\\{outfile}")
-    os.remove(foot_cfgFile) #clean up intermediate file
-    footprint.Close() #close analysis to avoid errors with limits on total number of analyses
-
-def coordinate_transform(global_matrix, local_coords):
-    '''
-    Transforms the specified local coordinates to the global coordinate system based on the matrix given
-    Parameters:
-    global_matrix (len=12 array): [R11, R12, R13, R21, R22, R23, R31, R32, R33, X0, Y0, Z0]
-    local_coords (len=2 array): [x,y,z] coordinates in local frame to be transformed with the global_matrix
-    Returns (float):
-    global_x, global_y, global_z
-    '''
-    [R11, R12, R13, R21, R22, R23, R31, R32, R33, X0, Y0, Z0] = global_matrix
-    local_x, local_y, local_z = local_coords
-    global_x = R11*local_x + R12*local_y + R13*local_z + X0 
-    global_y = R21*local_x + R22*local_y + R23*local_z + Y0
-    global_z = R31*local_x + R32*local_y + R33*local_z + Z0
-    return global_x, global_y, global_z
-
 
 ##main script
 # load local variables
@@ -115,7 +53,7 @@ pmirr_surf = 41
 
 #get footprints at pupil mirrors 
 for c in range(nconfigs):
-    get_footprint(IFU_System, config=c+1, field=0, wave=0, nrays=10, surface=pmirr_surf, delete_vignetted=False, outpath=res_dir+'footprints\\', outfile=f'footprint_config{c+1}_allfields_allwaves_pupil.txt')
+    get_footprint(ZOSAPI, IFU_System, config=c+1, field=0, wave=0, nrays=10, surface=pmirr_surf, delete_vignetted=False, outpath=res_dir+'footprints\\', outfile=f'footprint_config{c+1}_allfields_allwaves_pupil.txt')
 #read in text file and get values for center and radii
 pmir_xcen = np.full(nconfigs, fill_value=np.nan)
 pmir_ycen = np.full(nconfigs, fill_value=np.nan)

@@ -4,12 +4,18 @@ Written by: Maren Cosens
 Date: 4/22/26
 
 Description: uses ZOS-API to perform ray tracing on specified slices, wavelengths, and field positions to generate useful plots of image quality across the MIRMOS IFU
+-spot diagrams generated for each slice/band with every field position and overlay of three wavelengths spanning band
+-RMS spot radius for each band plotted as function of slice position
 -may be useful to make cartoon of slice with spot diagrams placed at corresponding field locations
     -colored by wavelength (multiple per band or just center?)
     -perhaps all slices on same figure? may get too busy and want to only include some positions
--plot of vignetting as a function of field position
+    (spots fairly consistent across a slice so for now just showing mean per slice - 2D plot could be made following procedure of vignetting plot)
+
+-footprint diagram for all bands with continuous spectra
+-plot of spectral and spatial extent on detector as a function of slice position for each band
 -plot of wavelength coverage loss as function of field position
--footprint plots for all bands (very slow to make in zemax with this many configurations)
+-plot of spacing between slices
+-plot of vignetting as a function of field position
 '''
 ##import packages
 import os
@@ -18,7 +24,7 @@ import zos_pyclass
 import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
-from System import Enum, Int32, Double
+from zemax_functions import get_footprint, get_spot_sizes, make_spot_diagram
 
 ##set-up rcparams to control plot style (later move to a custom file that is read in)
 #legend
@@ -32,211 +38,6 @@ mpl.rcParams['axes.titlesize'] = 14
 mpl.rcParams['axes.labelsize'] = 12
 
     
-##functions for various plots
-def make_spot_diagram(system, config, fields, waves, nrays, band, band_n, outpath=".\\", norm_waves=True):
-    """
-    Perform a ray trace using the ZOS-API and generate spot diagrams for a given configurations, fields, and wavelengths.
-
-    Parameters:
-    - system: The ZOS system object
-    - config: Configuration number
-    - fields: List of field numbers
-    - waves: List of wavelength numbers
-    - nrays: Number of rays for the analysis
-    - band: String name of band
-    - band_n: band number (to derive slice number)
-    - outpath: filepatch to save plot (default=".\\")
-    - norm_waves: bool; default = True; indicates whether to shift spot diagram centroids to 0,0
-
-    Returns:
-    - spot diagrams saved to outpath+'spot_diagram_slice{slice}{band}.png'
-    """
-    system.MCE.SetCurrentConfiguration(config) #switch to desired configuration
-    slice=config-21*band_n
-    #ray tracing adapted from 'PythonStandalone_22_seq_spot_diagram.py'
-    # Set up Batch Ray Trace
-    raytrace = system.Tools.OpenBatchRayTrace()
-    nsur = system.LDE.NumberOfSurfaces
-    max_rays = nrays
-    normUnPolData = raytrace.CreateNormUnpol((max_rays + 1) * (max_rays + 1), ZOSAPI.Tools.RayTrace.RaysType.Real, nsur)
-
-    # Define batch ray trace constants
-    max_wave = len(waves)
-    num_fields=len(fields)
-    field_x_ar = [system.SystemData.Fields.GetField(int(f)).X for f in fields]
-    field_y_ar = [system.SystemData.Fields.GetField(int(f)).Y for f in fields]
-    hy_ar = field_y_ar/(np.abs(np.max(field_y_ar))) #get normalization of field points
-    hx_ar = field_x_ar/(np.abs(np.max(field_x_ar)))
-    
-    # Initialize x/y image plane arrays
-    x_ar = np.empty((num_fields, max_wave, ((max_rays + 1) * (max_rays + 1))))
-    y_ar = np.empty((num_fields, max_wave, ((max_rays + 1) * (max_rays + 1))))
-
-    # Determine maximum field in X,Y
-    max_field_y, max_field_x =np.max(field_y_ar), np.max(field_x_ar)
-
-    if system.SystemData.Fields.GetFieldType() == ZOSAPI.SystemData.FieldType.Angle:
-        field_type = 'Angle'
-    elif system.SystemData.Fields.GetFieldType() == ZOSAPI.SystemData.FieldType.ObjectHeight:
-        field_type = 'Height'
-    elif system.SystemData.Fields.GetFieldType() == ZOSAPI.SystemData.FieldType.ParaxialImageHeight:
-        field_type = 'Height'
-    elif system.SystemData.Fields.GetFieldType() == ZOSAPI.SystemData.FieldType.RealImageHeight:
-        field_type = 'Height'
-    
-    #set-up figure prior to ray trace for each field
-    rows, cols = len(set(hy_ar)), len(set(hx_ar))
-    colors = ('y', 'm', 'c')
-    fig, ax = plt.subplots(nrows=rows, ncols=cols, figsize=(cols*2,rows*2), layout='tight') #set up subplots so each field is square, but doesn't reproduce aspect ratio of slice...(work on this later)
-    drop_ax=np.full((rows, cols), fill_value=True) #where this remains True after loop, drop these axes
-    for field in fields:
-        #get row and column based on field position relative to others
-        hy, hx = hy_ar[field-1], hx_ar[field-1]
-        row = np.argwhere(sorted(set(hy_ar))==hy)[0][0]
-        col = np.argwhere(sorted(set(hx_ar))==hx)[0][0]
-        drop_ax[row, col] = False
-        ax[row, col].set_title(f'{system.SystemData.Fields.GetField(field).Comment}')
-        for wave in waves:
-            # Adding Rays to Batch, varying normalised object height hy
-            normUnPolData.ClearData()
-            #for i = 1:((max_rays + 1) * (max_rays + 1))
-            for i in range(1, (max_rays + 1) * (max_rays + 1) + 1):
-                px = np.random.random() * 2 - 1
-                py = np.random.random() * 2 - 1
-                while (px*px + py*py > 1):
-                    py = np.random.random() * 2 - 1
-                normUnPolData.AddRay(wave, hx_ar[field -1], hy_ar[field -1], px, py, Enum.Parse(ZOSAPI.Tools.RayTrace.OPDMode, "None"))
-            
-            raytrace.RunAndWaitForCompletion()
-            # Read batch raytrace and display results
-            normUnPolData.StartReadingResults()
-            
-            # Python NET requires all arguments to be passed in as reference, so need to have placeholders
-            sysInt = Int32(1)
-            sysDbl = Double(1.0)
-            
-            output = normUnPolData.ReadNextResult(sysInt, sysInt, sysInt,
-                            sysDbl, sysDbl, sysDbl, sysDbl, sysDbl, sysDbl, sysDbl, sysDbl, sysDbl, sysDbl, sysDbl);
-
-            while output[0]:                                                    # success
-                if ((output[2] == 0) and (output[3] == 0)):                     # ErrorCode & vignetteCode
-                    x_ar[field - 1, wave - 1, output[1] - 1] = output[4]   # X
-                    y_ar[field - 1, wave - 1, output[1] - 1] = output[5]   # Y
-                output = normUnPolData.ReadNextResult(sysInt, sysInt, sysInt,
-                            sysDbl, sysDbl, sysDbl, sysDbl, sysDbl, sysDbl, sysDbl, sysDbl, sysDbl, sysDbl, sysDbl);
-            
-            ##filter results for plots
-            #remove zeros in results (throws off plot scale and outlier filtering)
-            x_ar[field-1, wave-1, :][x_ar[field-1, wave-1, :]==0], y_ar[field-1, wave-1, :][y_ar[field-1, wave-1, :]==0] = np.nan, np.nan
-            x_med = np.nanmedian(x_ar[field-1, wave-1, :])
-            y_med = np.nanmedian(y_ar[field-1, wave-1, :])
-            x_std = np.nanstd(x_ar[field-1, wave-1, :])
-            y_std = np.nanstd(y_ar[field-1, wave-1, :])
-            #remove significant outliers in results (throws off plot scale)
-            y_ar[field-1, wave-1, :][y_ar[field-1, wave-1, :] > y_med+5*y_std] = np.nan
-            y_ar[field-1, wave-1, :][y_ar[field-1, wave-1, :] < y_med-5*y_std] = np.nan
-            x_ar[field-1, wave-1, :][x_ar[field-1, wave-1, :] > x_med+5*x_std] = np.nan
-            x_ar[field-1, wave-1, :][x_ar[field-1, wave-1, :] < x_med-5*x_std] = np.nan
-            if norm_waves:
-                #apply shift
-                x_ar[field-1, wave-1, :] -= x_med
-                y_ar[field-1, wave-1, :] -= y_med
-            #create plot item
-            temp = ax[row,col].plot(np.squeeze(x_ar[field - 1, wave - 1, :]), np.squeeze(y_ar[field - 1, wave - 1, :]), '.', ms = 1, color = colors[wave - 1], label=f"$\\rm{system.SystemData.Wavelengths.GetWavelength(wave).Wavelength:.3f} \mu m$") 
-        #add circle for requirement (at centroid)
-        cx, cy = np.nanmedian(x_ar[field - 1, :, :]), np.nanmedian(y_ar[field - 1, :, :]) 
-        circle = plt.Circle((cx,cy), (2.355/2)*0.0169, fill=False, edgecolor='red', linewidth=1, linestyle='--')
-        ax[row, col].add_patch(circle)
-    #drop axes not used
-    bad_ax=np.argwhere(drop_ax)
-    for i in range(bad_ax.shape[0]):
-        ax[bad_ax[i][0], bad_ax[i][1]].remove()
-    plt.suptitle('Spot Diagram, Slice: %s' % (slice))
-    #make legend with only unique labels
-    handles, labels = plt.gca().get_legend_handles_labels()
-    by_label = dict(zip(labels, handles))
-    fig.legend(by_label.values(), by_label.keys(), markerscale=5, borderaxespad=5)
-    #plt.subplots_adjust(wspace=0.8)
-    plt.draw()
-    plt.savefig(f"{outpath}spot_diagram_slice{slice}{band}.png", bbox_inches='tight')
-    plt.close()
-    system.Tools.CurrentTool.Close() #need to add this in order to do a subsequent ray trace
-
-def get_spot_sizes(system, configs, fields, waves, nrays):
-    """
-    Computes spot sizes (RMS and geometric) for given configurations, fields, and wavelengths using ZOS-API spot analysis.
-
-    Parameters:
-    - system: The ZOS system object
-    - configs: List of configuration numbers
-    - fields: List of field numbers
-    - waves: List of wavelength numbers
-    - nrays: Number of rays for the analysis
-
-    Returns:
-    - results: numpy array of shape (len(configs), len(fields), len(waves), 2) containing RMS and Geo spot sizes
-    """
-    #IFU_MCE=IFU_System.MCE
-    spot = system.Analyses.New_Analysis_SettingsFirst(ZOSAPI.Analysis.AnalysisIDM.StandardSpot)
-    spot_setting = spot.GetSettings().__implementation__ #.__implementation__ added to deal with errors from using PythonNet3
-    spot_setting.Surface.UseImageSurface()
-    spot_setting.ReferTo = ZOSAPI.Analysis.Settings.Spot.Reference.Centroid
-    spot_setting.Patterns = ZOSAPI.Analysis.Settings.Spot.Patterns.Dithered 
-    spot_setting.RayDensity = nrays
-    results = np.full((len(configs), len(fields), len(waves), 2), fill_value=np.nan) #empty array for RMS and Geo radius for each field/wavelength
-    for k in range(len(configs)):
-        c=configs[k]
-        system.MCE.SetCurrentConfiguration(c)
-        for i in range(len(fields)):
-            for j in range(len(waves)):
-                f, w = fields[i], waves[j]
-                spot_setting.Field.SetFieldNumber(f)
-                spot_setting.Wavelength.SetWavelengthNumber(w)
-                spot.ApplyAndWaitForCompletion()
-                spot_results = spot.GetResults()
-                results[k, i, j, :] = spot_results.SpotData.GetRMSSpotSizeFor(f, w), spot_results.SpotData.GetGeoSpotSizeFor(f, w)
-    spot.Close() #close analysis to avoid errors with limits on total number of analyses
-    return results
-
-def get_footprint(system, config=1, field=0, wave=0, nrays=10, delete_vignetted=True, outpath=".\\", outfile="footprint_res.txt"):
-    """
-    Computes footprint diagram data for given configuration, field #, and wavelength # using ZOS-API analysis.
-
-    Parameters:
-    - system: The ZOS system object
-    - config (default=1): Configuration number
-    - field (default=0): Field number (0=all fields)
-    - wave (default=0): Wavelength number (0=all wavelengths)
-    - nrays (default=10): Number of rays for the analysis
-    - delete_vignetted (default=True): Whether to delete vignetted rays
-    - outpath (default=".\\"): filepath to save intermediate and final files
-    - outfile (default="footprint_res.txt"): filename to save footprint data (e.g. 'footprint_res.txt')
-
-    Returns:
-    - saves footprint diagram data to text file at outfile
-    """
-    system.MCE.SetCurrentConfiguration(config) #set to first config of K band
-    footprint = system.Analyses.New_Analysis(ZOSAPI.Analysis.AnalysisIDM.FootprintSettings) #Footprint Diagram not yet built in
-    #modify settings
-    foot_settings = footprint.GetSettings()
-    foot_cfgFile = f"{outpath}footprint_settings.cfg"
-    foot_settings.SaveTo(foot_cfgFile)
-    foot_settings.ModifySettings(foot_cfgFile, "FOO_RAYDENSITY", "10")
-    foot_settings.ModifySettings(foot_cfgFile, "FOO_SURFACE", str(system.LDE.NumberOfSurfaces))
-    foot_settings.ModifySettings(foot_cfgFile, "FOO_FIELD", str(field))
-    foot_settings.ModifySettings(foot_cfgFile, "FOO_WAVELENGTH", str(wave))
-    if delete_vignetted:
-        foot_settings.ModifySettings(foot_cfgFile, "FOO_DELETEVIGNETTED", "1") #1=yes, 0=no
-    else:
-        foot_settings.ModifySettings(foot_cfgFile, "FOO_DELETEVIGNETTED", "0") #1=yes, 0=no
-    foot_settings.LoadFrom(foot_cfgFile)
-    footprint.ApplyAndWaitForCompletion()
-    #read results and save to text file (later can read in and make plots)
-    foot_results = footprint.GetResults()
-    foot_results.GetTextFile(f"{outpath}\\{outfile}")
-    os.remove(foot_cfgFile) #clean up intermediate file
-    footprint.Close() #close analysis to avoid errors with limits on total number of analyses
-
 ##run functions of interest
 if __name__ == '__main__':
     # load local variables
@@ -251,7 +52,7 @@ if __name__ == '__main__':
     #path to save results
     res_dir='C:\\Users\\mcosens\\Documents\\Research_docs\\MIRMOS\\IFU\\'
     
-    #set to config1 for test
+    #set to config1 to start
     IFU_MCE=IFU_System.MCE
     IFU_MCE.SetCurrentConfiguration(1)
     #get system paramaters
@@ -260,18 +61,26 @@ if __name__ == '__main__':
     nconfigs=IFU_MCE.NumberOfConfigurations
 
     ##set shapes and colors for plotting (custom to MIRMOS)
-    band_shapes = ['o', 's', 'p', 'h', 'D']
     bands=['i', 'Y', 'J', 'H', 'K']
+    band_shapes = ['o', 's', 'p', 'h', 'D']
+    band_colors=np.linspace(0.1,1,len(bands))
     #use cycler to color points from sequential colormap
     N = len(bands)*nwaves
     plt.rcParams["axes.prop_cycle"] = plt.cycler("color", plt.cm.YlOrRd(np.linspace(0.1,1,N)))
 
-    #get center field position for each slice (should be the same for all configs in a band since only slice position is changing)
-    slice_cen = np.full(int(nconfigs/len(bands)), fill_value=np.nan)
+    #get field positions for each slice (should be the same for all configs in a band since only slice position is changing)
+    slice_cen = np.full(int(nconfigs/len(bands)), fill_value=np.nan) #center field y position
+    field_x = np.full((int(nconfigs/len(bands)), nfields), fill_value=np.nan) #x position of all 7 fields across each slice
+    field_y = np.full((int(nconfigs/len(bands)), nfields), fill_value=np.nan) #y position of all 7 fields across each slice
     for c in range(int(nconfigs/len(bands))):
         IFU_MCE.SetCurrentConfiguration(c+1)
         slice_cen[c] = IFU_System.SystemData.Fields.GetField(1).Y
+        for f in range(nfields):
+            field_x[c,f] = IFU_System.SystemData.Fields.GetField(f+1).X
+            field_y[c,f] = IFU_System.SystemData.Fields.GetField(f+1).Y
     slice_cen*=3600 #convert to arcseconds for plotting
+    field_x*=3600
+    field_y*=3600
 
     ##spot diagrams (field positions match layout on slice but spacing is not representative)
     '''
@@ -279,12 +88,12 @@ if __name__ == '__main__':
     for c in range(nconfigs):
         band_n=int(c/21)
         if c <21:
-            make_spot_diagram(IFU_System, c+1, range(1,nfields+1), range(1,nwaves+1), 30, bands[band_n], band_n, res_dir+'\\spot_diagrams\\', norm_waves=False) 
+            make_spot_diagram(ZOSAPI, IFU_System, c+1, range(1,nfields+1), range(1,nwaves+1), 30, bands[band_n], band_n, res_dir+'\\spot_diagrams\\', norm_waves=False) 
         else:
-            make_spot_diagram(IFU_System, c+1, range(1,nfields+1), range(1,nwaves+1), 30, bands[band_n], band_n, res_dir+'\\spot_diagrams\\', norm_waves=True)
+            make_spot_diagram(ZOSAPI, IFU_System, c+1, range(1,nfields+1), range(1,nwaves+1), 30, bands[band_n], band_n, res_dir+'\\spot_diagrams\\', norm_waves=True)
     
     ##get spot sizes for all fields and wavelengths
-    spot_radii = get_spot_sizes(IFU_System, range(1, nconfigs+1), range(1,nfields+1), range(1,nwaves+1), 15)[0]
+    spot_radii = get_spot_sizes(ZOSAPI, IFU_System, range(1, nconfigs+1), range(1,nfields+1), range(1,nwaves+1), 15)[0]
     rms_radii, geo_radii = spot_radii[:,:,:,0], spot_radii[:,:,:,1]
 
     ##generate plot of spot radii as a function of slice position for each wavelength
@@ -308,7 +117,7 @@ if __name__ == '__main__':
     plt.tight_layout()
     plt.savefig(f"{res_dir}RMS_spot_means.png", bbox_inches='tight')
     plt.close()
-    '''
+
     ##detector footprint stats for each band
     #calculate spatial extent on detector for each slice/band
     #use without vignetting to evaluate fraction of wavelength range truncated for each slice
@@ -316,7 +125,7 @@ if __name__ == '__main__':
     for c in range(nconfigs):
         for f in range(nfields):
             for w in range(nwaves):
-                get_footprint(IFU_System, config=c+1, field=f+1, wave=w+1, nrays=10, delete_vignetted=False, outpath=res_dir+'footprints\\', outfile=f'footprint_config{c+1}_field{f+1}_wave{w+1}.txt')
+                get_footprint(ZOSAPI, IFU_System, config=c+1, field=f+1, wave=w+1, nrays=10, delete_vignetted=False, outpath=res_dir+'footprints\\', outfile=f'footprint_config{c+1}_field{f+1}_wave{w+1}.txt')
     #read in text file and get positions and extent, save to arrays
     for c in range(nconfigs):
         for fd in range(nfields):
@@ -333,7 +142,6 @@ if __name__ == '__main__':
                                 spec_ycen[c,fd,w] = float(value.strip())
     #use positions to plot footprint diagrams for each band, color by slice (fill is approximate)
     plt.rcParams["axes.prop_cycle"] = plt.cycler("color", plt.cm.tab20b(np.concatenate([np.linspace(0.5,1,11), np.linspace(0.5,0,11)])))
-    plt.rcParams["axes.prop_cycle"] = plt.cycler("color", plt.cm.nipy_spectral(np.concatenate([np.linspace(0.5,1,11), np.linspace(0.5,0,11)])))
     fig, ax = plt.subplots(nrows=2, ncols=2, figsize=(10,10), layout='tight')
     col_num=np.linspace(0.1,1,21)
     for i in range(len(bands)-1):
@@ -441,11 +249,113 @@ if __name__ == '__main__':
             elif spectral_table[f"{bands[i]}_trunc_frac"][j]>0: #blue end truncated
                 spectral_table.loc[j, f"{bands[i]}_start"] = band_start + spectral_table[f"{bands[i]}_trunc_frac"][j]*(band_end - band_start)
     spectral_table.to_csv(f"{res_dir}spectral_coverage_table.csv")
+    
+    ##Evaluate footprint diagrams at pupil for each band to get centration and radius
+    for c in range(nconfigs):
+        get_footprint(ZOSAPI, IFU_System, config=c+1, field=0, wave=0, nrays=10, surface=66, delete_vignetted=False, outpath=res_dir+'footprints\\', outfile=f'footprint_config{c+1}_allfields_allwaves_pupil.txt')
+    #read in text file and get values for center and radii
+    pupil_xcen = np.full(nconfigs, fill_value=np.nan)
+    pupil_ycen = np.full(nconfigs, fill_value=np.nan)
+    pupil_xrad = np.full(nconfigs, fill_value=np.nan)
+    pupil_yrad = np.full(nconfigs, fill_value=np.nan)
+    for c in range(nconfigs):
+        with open(f"{res_dir}\\footprints\\footprint_config{c+1}_allfields_allwaves_pupil.txt", 'r', encoding='utf-16') as f:
+            lines = f.readlines()
+            for line in lines:
+                if '=' in(line):
+                    param, value = line.split('=')
+                    if param.strip()=='Ray X Center':
+                        pupil_xcen[c] = float(value.strip())
+                    elif param.strip()=='Ray Y Center':
+                        pupil_ycen[c] = float(value.strip())
+                    elif param.strip()=='Ray X Half Width':
+                        pupil_xrad[c] = float(value.strip())
+                    elif param.strip()=='Ray Y Half Width':
+                        pupil_yrad[c] = float(value.strip())
+    #generate plot of pupil centration and radius by slice position and band
+    fig, ax = plt.subplots(nrows=2, ncols=1, figsize=(7,10), layout='tight', sharex=True)
+    for i in range(len(bands)): #loop through each MIRMOS spectral band
+        ax[0].plot(slice_cen, np.abs(pupil_xcen[i*21:21+i*21]), band_shapes[i], mfc='none', mec=plt.cm.YlOrRd(band_colors[i]))#, label=bands[i]+' band') 
+        ax[0].plot(slice_cen, np.abs(pupil_ycen[i*21:21+i*21]), band_shapes[i], c=plt.cm.YlOrRd(band_colors[i]), label=bands[i]+' band')
+        ax[1].plot(slice_cen, pupil_xrad[i*21:21+i*21], band_shapes[i], mfc='none', mec=plt.cm.YlOrRd(band_colors[i]))#label=bands[i]+' band')
+        ax[1].plot(slice_cen, pupil_yrad[i*21:21+i*21], band_shapes[i], c= plt.cm.YlOrRd(band_colors[i]), label=bands[i]+' band') 
+    ax[0].set_ylabel("Pupil Decenter [mm]")
+    ax[1].set_ylabel("Pupil Radius [mm]")
+    ax[1].set_xlabel("Slice Position From Center [arcseconds]")
+    xlims, ylims = ax[1].get_xlim(), ax[1].get_ylim() #limits based on results
+    ax[1].hlines(y=58.5, xmin=xlims[0], xmax=xlims[1], color='r', alpha=0.7, ls='solid', zorder=0, label='Lyot stop') #nominal Lyot stop radius in K radius
+    ax[1].plot(xlims[0]-10,ylims[0]-10, 'o',mfc='none', mec='k', label='x direction')
+    ax[1].plot(xlims[0]-10,ylims[0]-10, 'o', c='k', label='y direction')
+    ax[1].set_xlim(xlims)
+    ax[1].set_ylim(ylims)
+    #customize order of labels in legend
+    handles, labels = ax[1].get_legend_handles_labels()
+    order = [0, 6, 1, 7, 2, 5, 3, 4]
+    ax[0].legend([handles[i] for i in order], [labels[i] for i in order], ncols=5, loc='upper center')
+    plt.tight_layout()
+    plt.savefig(f"{res_dir}pupil_metrics.png", bbox_inches='tight')
+    plt.close()
+    '''
 
-    ##footprint diagrams at pupil for each band
-    #use to calculate vignetting as function of field position
-
-    ##footprints at pupil mirrors (use to set aperture for each by modifying MCE)
+    ##plot of vignetting as function of field position
+    #need to add Lyot stop aperture for accurate vignetting
+    #will need to repeat footprint analysis with delete_vignetted=True (use only central wavelength to remove impact of spectra falling off detector)
+    vignet_frac = np.full((nconfigs, nfields), fill_value=np.nan)
+    for c in range(nconfigs):
+        for f in range(nfields):
+            get_footprint(ZOSAPI, IFU_System, config=c+1, field=f+1, wave=2, nrays=10, delete_vignetted=True, outpath=res_dir+'footprints\\', outfile=f'footprint_config{c+1}_field{f+1}_wave2_vignetting.txt')
+    #read in text file and get percent of rays through
+    for c in range(nconfigs):
+        for fd in range(nfields):
+                with open(f"{res_dir}\\footprints\\footprint_config{c+1}_field{fd+1}_wave2_vignetting.txt", 'r', encoding='utf-16') as f:
+                    lines = f.readlines()
+                    line = lines[-1]
+                    param, val = line.split('=')
+                    val_num, val_unit = val.split('%')
+                    vignet_frac[c,fd] = 1- float(val_num.strip())/100 #convert to fraction of rays vignetted rather than through
+    #plot as function of x,y field position
+    vign_nans=copy.copy(vignet_frac)
+    vign_nans[vign_nans==0]=np.nan #to filter out points with no vignetting for plotting
+    max_vign=np.nanmax(vignet_frac)
+    #interpolate between field points
+    fig, ax = plt.subplots(nrows=3, ncols=2, figsize=(10,10))
+    for i in range(len(bands)):
+        if i==0:
+            row, col = 2,0 #put at the bottom since this is the least relevant for vignetting
+        else:
+            j=i-1
+            col = j%2
+            row = int(j/2)
+        ax[row, col].set_title(f"{bands[i]} band")
+        ax[row,col].pcolormesh(field_x, field_y, vign_nans[i*21:21+i*21,:], cmap='bone_r', vmin=0, vmax=max_vign, shading = 'gouraud') #not the smoothest but seems to be best option without dealing with field positions not being sequential or regular grid
+        ax[row,col].set_xlabel("Field X [arcseconds]")
+        ax[row,col].set_ylabel("Field Y [arcseconds]")
+    ax[2, 1].axis('off')
+    sm = plt.cm.ScalarMappable(cmap='bone_r', norm=plt.Normalize(vmin=0.01, vmax=max_vign))
+    sm.set_array([])
+    fig.colorbar(sm, ax=ax.ravel().tolist(), label='Fraction of Rays Vignetted', pad=0.05, location='right')
+    fig.subplots_adjust(wspace=0.25, hspace=0.3, top=0.95, bottom=0.05, left=0.1, right=0.75)
+    plt.savefig(f"{res_dir}vignetting_smooth.png", bbox_inches='tight')
+    plt.close()
+    #discrete field points
+    fig, ax = plt.subplots(nrows=3, ncols=2, figsize=(10,10))
+    for i in range(len(bands)):
+        if i==0:
+            row, col = 2,0 #put at the bottom since this is the least relevant for vignetting
+        else:
+            j=i-1
+            col = j%2
+            row = int(j/2)
+        ax[row, col].set_title(f"{bands[i]} band")
+        ax[row, col].scatter(field_x.flatten(), field_y.flatten(), c=vignet_frac[i*21:21+i*21,:].flatten(), marker='s', cmap='bone_r', vmin=0.01, vmax=max_vign, alpha=0.8)
+        ax[row,col].set_xlabel("Field X Position [arcseconds]")
+        ax[row,col].set_ylabel("Field Y Position [arcseconds]")  
+    ax[2, 1].axis('off')
+    fig.colorbar(sm, ax=ax.ravel().tolist(), label='Fraction of Rays Vignetted', pad=0.05, location='right')
+    fig.subplots_adjust(wspace=0.25, hspace=0.3, top=0.95, bottom=0.05, left=0.1, right=0.75)
+    plt.savefig(f"{res_dir}vignetting_discrete.png", bbox_inches='tight')
+    plt.close()
+    #make 1-D cuts?
 
     # close server instance of OpticStudio
     del zos
