@@ -13,7 +13,7 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 import numpy as np
 from System import Enum, Int32, Double
-from zemax_functions import get_footprint, local_to_global_coords #would need to make more general and pass api instance to make this work - Todo later
+from zemax_functions import get_footprint, local_to_global_coords
 
 ##set-up rcparams to control plot style (later move to a custom file that is read in)
 #legend
@@ -32,7 +32,7 @@ zos = zos_pyclass.PythonStandaloneApplication()
 
 ZOSAPI = zos.ZOSAPI
 IFU_System = zos.TheSystem
-TheApplication = zos.TheApplication
+#TheApplication = zos.TheApplication
     
 # Setup
 IFU_System.LoadFile(r'C:\Users\mcosens\Documents\Zemax\MIRMOS\IFU\MIRMOS_full_IFS.zos', False)

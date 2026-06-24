@@ -58,7 +58,7 @@ if __name__ == '__main__':
         for j in range(bands):
             current_op.GetOperandCell(j+1).Value = IFS_op.GetOperandCell(1).Value
     
-    ##add configurations with parameters for each slice, repeat for each band
+    ##add configurations with parameters for each slice, repeat for each band (could change to pickup for all bands after the first)
     for k in range(bands):
         start_config=1+k*IFS_nconfigs
         for i in range(start_config,start_config+IFS_nconfigs-1): #start at 1 since new config is added after
@@ -71,7 +71,7 @@ if __name__ == '__main__':
                 current_op=Full_MCE.GetOperandAt(start_op_length+j)
                 current_op.GetOperandCell(i+1).Value = IFS_op.GetOperandCell(i-start_config+2).Value #set operand values to match existing K band MCE configurations
     
-    Full_System.SaveAs("C:\\Users\\mcosens\\Documents\\Zemax\\MIRMOS\\IFU\\MIRMOS_full_IFS.zmx") #save as zmx in order to make plotting functions work in 'make_IFU_plots.py'?
+    Full_System.SaveAs("C:\\Users\\mcosens\\Documents\\Zemax\\MIRMOS\\IFU\\MIRMOS_full_IFS.zos") 
 
     # close server instance of OpticStudio
     del zos

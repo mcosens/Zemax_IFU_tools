@@ -18,7 +18,7 @@ Description: uses ZOS-API to perform ray tracing on specified slices, wavelength
 -plot of vignetting as a function of field position
 '''
 ##import packages
-import os
+import os, copy
 import pandas as pd
 import zos_pyclass
 import matplotlib as mpl
@@ -45,7 +45,7 @@ if __name__ == '__main__':
 
     ZOSAPI = zos.ZOSAPI
     IFU_System = zos.TheSystem
-    TheApplication = zos.TheApplication
+    #TheApplication = zos.TheApplication
     
     # Setup
     IFU_System.LoadFile(r'C:\Users\mcosens\Documents\Zemax\MIRMOS\IFU\MIRMOS_full_IFS.zos', False)
@@ -152,6 +152,8 @@ if __name__ == '__main__':
             ax[row, col].fill_between(x=[np.nanmin(spec_xcen[k,:,:]), np.nanmax(spec_xcen[k,:,:])], y1=np.nanmin(spec_ycen[k,:,:]), y2=np.nanmax(spec_ycen[k,:,:]))
         ax[row, col].set_xlim(-18.4, 18.4)
         ax[row, col].set_ylim(-18.4, 18.4)
+        ax[row, col].set_xlabel("X Position on Detector [mm]")
+        ax[row, col].set_ylabel("Y Position on Detector [mm]")
     plt.tight_layout()
     plt.savefig(f"{res_dir}footprint_diagrams.png", bbox_inches='tight')
     plt.close()
@@ -355,8 +357,26 @@ if __name__ == '__main__':
     fig.subplots_adjust(wspace=0.25, hspace=0.3, top=0.95, bottom=0.05, left=0.1, right=0.75)
     plt.savefig(f"{res_dir}vignetting_discrete.png", bbox_inches='tight')
     plt.close()
+    ##single band vignetting diagram
+    fig, ax = plt.subplots(nrows=1, ncols=1, figsize=(6.5,5))
+    i=4
+    ax.set_title(f"{bands[i]}-band Vignetting")
+    ax.scatter(field_x.flatten(), field_y.flatten(), c=vignet_frac[i*21:21+i*21,:].flatten()*100, marker='s', cmap='bone_r', vmin=0.01*100, vmax=max_vign*100, alpha=1)
+    ax.set_xlabel("Field X Position [arcseconds]")
+    ax.set_ylabel("Field Y Position [arcseconds]")
+    ax.set_xlim(np.nanmin(field_x)-.5, np.nanmax(field_x)+.5)
+    ax.set_ylim(np.nanmin(field_y)-.5, np.nanmax(field_y)+.5)
+    sm = plt.cm.ScalarMappable(cmap='bone_r', norm=plt.Normalize(vmin=0.01*100, vmax=max_vign*100))
+    sm.set_array([])
+    plt.colorbar(sm, ax=ax, label='% of Rays Vignetted', pad=0.05, location='right') 
+    plt.tight_layout()
+    plt.savefig(f"{res_dir}vignetting_{bands[i]}band.png", bbox_inches='tight')
+    plt.close()
     #make 1-D cuts?
 
     # close server instance of OpticStudio
     del zos
     zos = None
+
+
+    
